@@ -3,5 +3,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 pub mod crc32c;
+pub mod hash;
 pub mod random;
 pub mod slice;
+mod coding;
