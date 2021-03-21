@@ -2,4 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-pub mod util;
+pub mod crc32c;
+pub mod arena;
+pub mod hash;
+pub mod random;
+pub mod slice;
