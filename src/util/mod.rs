@@ -4,3 +4,4 @@
 
 pub mod crc32c;
 pub mod random;
+pub mod slice;
