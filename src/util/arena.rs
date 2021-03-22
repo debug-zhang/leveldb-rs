@@ -132,7 +132,7 @@ impl Arena {
 
         let result = buf.as_mut_ptr();
         self.blocks.push(buf);
-        self.memory_usage = self.memory_usage + block_bytes;
+        self.memory_usage = self.memory_usage + block_bytes + mem::size_of::<usize>();
 
         result
     }
