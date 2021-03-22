@@ -46,19 +46,44 @@ impl Arena {
                 self.alloc_bytes_remaining -= bytes;
             }
             result
+        } else {
+            self.allocate_fallback(bytes)
         }
-        self.allocate_fallback(bytes)
     }
 
     /// Return a pointer aligned to a newly byte slice with length `bytes`.
-    /// TODO
-    pub fn allocate_aligned() -> *mut u8 {
+    pub fn allocate_aligned(&mut self, bytes: usize) -> *mut u8 {
         let ptr_size = mem::size_of::<usize>();
-        let aligns = if ptr_size > 8 { ptr_size } else { 8 };
+        let aligns = if ptr_size > 8 {
+            ptr_size
+        } else {
+            8
+        };
         // Pointer size should be a power of 2.
-        assert_eq!((align & (align - 1)), 0);
+        assert_eq!((aligns & (aligns - 1)), 0);
 
-        0
+        let current_mode = (self.alloc_ptr as usize) & (aligns - 1);
+        let slop = if current_mode == 0 {
+            0
+        } else {
+            aligns - current_mode
+        };
+        let needed = bytes + slop;
+
+        let result = if needed <= self.alloc_bytes_remaining {
+            unsafe {
+                let tmp = self.alloc_ptr.offset(slop as isize);
+                self.alloc_ptr = self.alloc_ptr.offset(needed as isize);
+                self.alloc_bytes_remaining -= needed;
+                tmp
+            }
+        } else {
+            // allocate_fallback always returned aligned memory
+            self.allocate_fallback(bytes)
+        };
+
+        assert_eq!((result as usize) & (aligns - 1), 0);
+        result
     }
 
     /// Returns an estimate of the total memory usage of data allocated by the arena.
@@ -67,5 +92,7 @@ impl Arena {
     }
 
     /// TODO
-    fn allocate_fallback(&mut self, bytes: usize) -> *mut u8 {}
+    fn allocate_fallback(&mut self, bytes: usize) -> *mut u8 {
+        ptr::null_mut()
+    }
 }
