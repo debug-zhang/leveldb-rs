@@ -3,6 +3,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 pub mod arena;
+pub mod cache;
 pub mod crc32c;
 pub mod hash;
 pub mod random;
