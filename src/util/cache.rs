@@ -3,11 +3,12 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 use crate::util::slice::Slice;
-use crate::util::hash;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::ptr;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 pub trait Handle<T> {
     fn get_value(&self) -> &T;
@@ -96,9 +97,9 @@ struct LRUHandle<T: Default + Debug> {
 
 type LRUHandlePtr<T> = Rc<RefCell<LRUHandle<T>>>;
 
-impl LRUHandle<T> where
-    T: Debug + Debug {
-    fn new(value: T, charge: usize, deleter: Box<dyn FnMt((&Slice, &T))>,
+impl<T> LRUHandle<T> where
+    T: Default + Debug {
+    fn new(value: T, charge: usize, deleter: Box<dyn FnMut(&Slice, &T)>,
            key_data: Box<[u8]>) -> Self {
         Self {
             value,
@@ -111,7 +112,7 @@ impl LRUHandle<T> where
     }
 
     fn key(&self) -> Slice {
-        assert_ne!(next, self);
+        assert_ne!(self.next, self.prev);
         Slice::from(&self.key_data[..])
     }
 }
@@ -145,5 +146,74 @@ impl<T> Handle<T> for LRUHandle<T> where
     T: Default + Debug {
     fn get_value(&self) -> &T {
         &self.value
+    }
+}
+
+/// TODO
+type HandleTable<T> = HashMap<Slice, LRUHandlePtr<T>>;
+
+/// mutex protects the following state.
+struct MutexData<T: Default + Debug> {
+    usage: usize,
+
+    // Dummy head of LRU list.
+    // lru.prev is newest entry, lru.next is oldest entry.
+    // Entries have refs==1 and in_cache==true.
+    lru: *mut LRUHandle<T>,
+
+    // Dummy head of in-use list.
+    // Entries are in use by clients, and have refs >= 2 and in_cache==true.
+    in_use: *mut LRUHandle<T>,
+    table: HandleTable<T>,
+}
+
+/// A single shard of sharded cache.
+struct LRUCache<T: Default + Debug + 'static> {
+    // Initialized before use.
+    capacity: usize,
+
+    // mutex protects the following state.
+    mutex: Mutex<MutexData<T>>,
+}
+
+impl<T> LRUCache<T> where
+    T: Default + Debug + 'static {
+    fn new(capacity: usize) -> Self {
+        let mutex_data = MutexData {
+            usage: 0,
+            lru: Self::create_dummy_node(),
+            in_use: Self::create_dummy_node(),
+            table: HashMap::default(),
+        };
+
+        Self {
+            capacity,
+            mutex: Mutex::new(mutex_data),
+        }
+    }
+
+    fn create_dummy_node() -> *mut LRUHandle<T> {
+        unsafe {
+            let n = Box::into_raw(Box::new(LRUHandle::default()));
+            (*n).next = n;
+            (*n).prev = n;
+            n
+        }
+    }
+
+    fn drop_dummy_node(n: *mut LRUHandle<T>) {
+        assert!(!n.is_null());
+        unsafe {
+            let _ = Box::from_raw(n);
+        }
+    }
+}
+
+impl<T> Drop for LRUCache<T> where
+    T: Default + Debug + 'static {
+    fn drop(&mut self) {
+        let mutex_data = self.mutex.lock().unwrap();
+        Self::drop_dummy_node(mutex_data.lru);
+        Self::drop_dummy_node(mutex_data.in_use);
     }
 }
