@@ -9,6 +9,8 @@ use std::fmt::Debug;
 use std::ptr;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::ops::DerefMut;
+use std::borrow::{Borrow, BorrowMut};
 
 pub trait Handle<T> {
     fn get_value(&self) -> &T;
@@ -26,7 +28,7 @@ pub trait Cache<T> {
     /// When the inserted entry is no longer needed, the key and
     /// value will be passed to `deleter`.
     fn insert(&mut self, key: Slice, value: T, charge: usize,
-              deleter: Box<dyn FnMut(&Slice, &T)>) -> dyn Handle<T>;
+              deleter: Box<dyn FnMut(&Slice, &T)>) -> HandlePtr<T>;
 
     /// If the cache has no mapping for "key", returns nullptr.
     ///
@@ -192,6 +194,49 @@ impl<T> LRUCache<T> where
         }
     }
 
+    fn lru_remove(e: *mut LRUHandle<T>) {
+        unsafe {
+            (*(*e).next).prev = (*e).prev;
+            (*(*e).prev).next = (*e).next;
+        }
+    }
+
+    fn lru_append(list: *mut LRUHandle<T>, e: *mut LRUHandle<T>) {
+        unsafe {
+            // Make `e` newest entry by inserting just before list
+            (*e).next = list;
+            (*e).prev = (*list).prev;
+            (*(*e).prev).next = e;
+            (*(*e).next).prev = e;
+        }
+    }
+
+    fn inc_ref(list: *mut LRUHandle<T>, e: &LRUHandlePtr<T>) {
+        // If on lru list, move to in_use list.
+        if Rc::strong_count(e) == 1 {
+            let p = e.borrow().deref_mut().as_ptr();
+            Self::lru_remove(p);
+            Self::lru_append(list, p);
+        }
+    }
+
+    fn dec_ref(list: *mut LRUHandle<T>, e: LRUHandlePtr<T>) {
+        let c = Rc::strong_count(&e);
+        assert!(c > 0);
+        if c == 2 {
+            // Deallocate.
+            let p = e.borrow().deref_mut().as_ptr();
+            Self::lru_remove(p);
+            Self::lru_append(list, p);
+        }
+    }
+
+    fn finish_erase(mutex_data: &mut MutexData<T>, mut e: LRUHandlePtr<T>) {
+        mutex_data.usage -= e.borrow().charge;
+        Self::lru_remove(e.borrow().deref_mut().as_ptr());
+        Self::dec_ref(mutex_data.lru, e);
+    }
+
     fn create_dummy_node() -> *mut LRUHandle<T> {
         unsafe {
             let n = Box::into_raw(Box::new(LRUHandle::default()));
@@ -216,4 +261,69 @@ impl<T> Drop for LRUCache<T> where
         Self::drop_dummy_node(mutex_data.lru);
         Self::drop_dummy_node(mutex_data.in_use);
     }
+}
+
+impl<T: Default + Debug + 'static> Cache<T> for LRUCache<T> {
+    fn insert(&mut self, key: Slice, value: T, charge: usize,
+              deleter: Box<dyn FnMut(&Slice, &T)>) -> HandlePtr<T> {
+        let mut mutex_data = self.mutex.lock().unwrap();
+
+        let key_data = Vec::from(key.slice_data()).into_boxed_slice();
+        let mut e = LRUHandle::new(value, charge, deleter, key_data);
+
+        let r = if self.capacity > 0 {
+            // for the cache's reference.
+            let r = Rc::new(RefCell::new(e));
+            Self::lru_append(mutex_data.in_use, r.clone().borrow_mut().as_ptr());
+            mutex_data.usage += charge;
+            if let Some(old) = mutex_data.table.insert(key, r.clone()) {
+                Self::finish_erase(&mut mutex_data, old);
+            };
+            r
+        } else {
+            // don't cache. (capacity_==0 is supported and turns off caching.)
+            // next is read by key() in an assert, so it must be initialized
+            e.next = ptr::null_mut();
+            Rc::new(RefCell::new(e))
+        };
+
+        let lru = mutex_data.lru;
+        unsafe {
+            while mutex_data.usage > self.capacity && (*lru).next != lru {
+                let old = (*lru).next;
+                if let Some(old) = mutex_data.table.remove(&(*old).key()) {
+                    assert_eq!(Rc::strong_count(&old), 1);
+                    Self::finish_erase(&mut mutex_data, old);
+                }
+            }
+        }
+
+        r
+    }
+
+    fn lookup(&self, key: &Slice) -> Option<HandlePtr<T>> {
+        let mutex_data = self.mutex.lock().unwrap();
+        match mutex_data.table.get(&key) {
+            Some(e) => {
+                Self::inc_ref(mutex_data.in_use, e);
+                Some(e.clone())
+            }
+            None => None,
+        }
+    }
+
+    fn release(&mut self, handle: HandlePtr<T>) {
+        let mutex_data = self.mutex.lock().unwrap();
+        Self::dec_ref(mutex_data.lru, handle);
+    }
+
+    fn value(&self, handle: HandlePtr<T>);
+
+    fn erase(&mut self, key: &Slice);
+
+    fn new_id(&self) -> u64;
+
+    fn prune(&mut self);
+
+    fn total_charge(&self) -> usize;
 }
